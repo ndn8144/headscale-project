@@ -1,0 +1,147 @@
+# =================================================================
+# HEADSCALE CONFIGURATION - PRODUCTION OPTIMIZED
+# =================================================================
+
+# Server configuration
+server_url: https://headscale.tailnet.work
+listen_addr: 0.0.0.0:8080
+metrics_listen_addr: 0.0.0.0:9090
+
+# DERP configuration for NAT traversal
+derp:
+  server:
+    enabled: false
+  urls:
+    - https://controlplane.tailscale.com/derpmap/default
+
+# Database configuration
+database:
+  type: postgres
+  postgres:
+    host: postgres
+    port: 5432
+    name: headscale
+    user: headscale
+    pass: wA7PGSVwuO9sWJy4gvMY1coGCN4irWB16ye1XRqU
+    ssl_mode: disable
+    max_open_conns: 10
+    max_idle_conns: 5
+    conn_max_lifetime: 1h
+
+# gRPC configuration
+grpc_listen_addr: 0.0.0.0:50443
+grpc_allow_insecure: false
+
+# Private key path
+private_key_path: /var/lib/headscale/private.key
+
+# Noise configuration for Tailscale v2
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+
+# IP prefix configuration
+prefixes:
+  v4: 100.64.0.0/10
+  v6: fd7a:115c:a1e0::/48
+  allocation: sequential
+
+# DNS configuration
+dns:
+  override_local_dns: true
+  base_domain: internal.tailnet.work
+  magic_dns: true
+  domains:
+    - internal.tailnet.work
+  nameservers:
+    global:
+      - 1.1.1.1
+      - 1.0.0.1
+      - 2606:4700:4700::1111
+      - 2606:4700:4700::1001
+    restricted:
+      "internal.tailnet.work":
+        - 172.20.0.10  # Internal DNS for company resources
+
+# OIDC configuration for user authentication
+oidc:
+  issuer: "https://accounts.google.com"
+  client_id: ${OIDC_CLIENT_ID}
+  client_secret: ${OIDC_CLIENT_SECRET}
+  scope: ["openid", "profile", "email"]
+  extra_params: {}
+  allowed_domains:
+    - tailnet.work
+    - company.com
+  allowed_groups: []
+  allowed_users: []
+  expiry: 180d
+  use_expiry_from_token: false
+
+# Logging configuration
+log:
+  level: info
+  format: text
+
+# Policy configuration
+policy:
+  mode: file  # file or database
+  path: /etc/headscale/acl.hujson
+
+# Unix socket
+unix_socket: /var/run/headscale/headscale.sock
+unix_socket_permission: "0770"
+
+# Logtail configuration (optional)
+logtail:
+  enabled: false
+
+# Randomize client port
+randomize_client_port: false
+
+# TLS configuration
+tls_cert_path: ""
+tls_key_path: ""
+
+# CLI
+cli:
+  insecure: false
+  timeout: 5s
+  address: headscale:50443
+
+# Ephemeral node settings
+ephemeral_node_inactivity_timeout: 30m
+
+# Node update check interval
+node_update_check_interval: 10s
+
+# Database backup configuration
+db_backup:
+  enabled: true
+  interval: 6h
+  path: /var/lib/headscale/backups
+  retention: 168h  # 7 days
+
+# Metrics configuration
+metrics:
+  enabled: true
+  listen_addr: 0.0.0.0:9090
+  path: /metrics
+
+# Profiling (development only)
+profiling:
+  enabled: false
+  listen_addr: 0.0.0.0:6060
+
+# Feature flags
+features:
+  ssh: true
+  announce_dns_addr: true
+  
+# Machine registration settings
+machine_registration:
+  allow_unknown_nodes: false  # Require pre-auth keys
+  
+# Tuning parameters
+tuning:
+  batch_change_delay: 800ms
+  node_mtu: 1280

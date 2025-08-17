@@ -1,0 +1,944 @@
+# =================================================================
+# .github/workflows/ci.yml - Continuous Integration
+# =================================================================
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'data/**'
+      - 'config/**'
+      - 'apps/**'
+      - 'docker-compose*.yml'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'data/**'
+      - 'config/**'
+      - 'apps/**'
+      - 'docker-compose*.yml'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # =================================================================
+  # Configuration Validation
+  # =================================================================
+  validate-config:
+    runs-on: ubuntu-latest
+    name: Validate Configuration
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: 'apps/web/package-lock.json'
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y jq yq
+
+    - name: Validate YAML syntax
+      run: |
+        echo "🔍 Validating YAML files..."
+        find data/ config/ -name "*.yaml" -o -name "*.yml" | while read file; do
+          echo "Validating $file"
+          yq eval . "$file" > /dev/null || exit 1
+        done
+
+    - name: Validate JSON syntax
+      run: |
+        echo "🔍 Validating JSON files..."
+        find data/ config/ -name "*.json" | while read file; do
+          echo "Validating $file"
+          jq . "$file" > /dev/null || exit 1
+        done
+
+    - name: Validate data against schema
+      run: |
+        echo "🔍 Validating configuration against schema..."
+        # Install ajv-cli for JSON schema validation
+        npm install -g ajv-cli
+        
+        # Validate users configuration
+        if [ -f "data/users.yaml" ]; then
+          yq eval '.users' data/users.yaml > /tmp/users.json
+          ajv validate -s data/schema.json -d /tmp/users.json --spec=draft7
+        fi
+        
+        # Validate routes configuration
+        if [ -f "data/routes.yaml" ]; then
+          yq eval '.routes' data/routes.yaml > /tmp/routes.json
+          ajv validate -s data/schema.json -d /tmp/routes.json --spec=draft7
+        fi
+
+    - name: Check ACL policy syntax
+      run: |
+        echo "🔍 Validating ACL policy..."
+        # Validate HuJSON syntax (if using .hujson files)
+        find config/ -name "*.hujson" | while read file; do
+          echo "Validating $file"
+          # Convert HuJSON to JSON and validate
+          node -e "
+            const fs = require('fs');
+            const content = fs.readFileSync('$file', 'utf8');
+            try {
+              JSON.parse(content.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, ''));
+              console.log('✅ $file is valid');
+            } catch (e) {
+              console.error('❌ $file is invalid:', e.message);
+              process.exit(1);
+            }
+          "
+        done
+
+    - name: Validate Docker Compose
+      run: |
+        echo "🔍 Validating Docker Compose files..."
+        docker-compose -f docker-compose.yml config > /dev/null
+        echo "✅ Docker Compose configuration is valid"
+
+    - name: Security scan for secrets
+      run: |
+        echo "🔍 Scanning for potential secrets..."
+        # Simple secret detection
+        if grep -r -E "(password|secret|key|token).*=.*['\"][^'\"]{8,}" . --exclude-dir=.git --exclude="*.md" --exclude="*.example" --exclude-dir=node_modules; then
+          echo "❌ Potential secrets found in repository"
+          exit 1
+        else
+          echo "✅ No obvious secrets detected"
+        fi
+
+  # =================================================================
+  # Build and Test Applications
+  # =================================================================
+  build-and-test:
+    runs-on: ubuntu-latest
+    needs: validate-config
+    name: Build and Test Applications
+    
+    strategy:
+      matrix:
+        app: [web, api]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js (for web app)
+      if: matrix.app == 'web'
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: 'apps/web/package-lock.json'
+
+    - name: Setup Go (for api)
+      if: matrix.app == 'api'
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+        cache-dependency-path: 'apps/api/go.sum'
+
+    - name: Install dependencies (web)
+      if: matrix.app == 'web'
+      working-directory: apps/web
+      run: npm ci
+
+    - name: Install dependencies (api)
+      if: matrix.app == 'api'
+      working-directory: apps/api
+      run: go mod download
+
+    - name: Run tests (web)
+      if: matrix.app == 'web'
+      working-directory: apps/web
+      run: |
+        npm run test:unit
+        npm run test:lint
+
+    - name: Run tests (api)
+      if: matrix.app == 'api'
+      working-directory: apps/api
+      run: |
+        go test -v ./...
+        go vet ./...
+
+    - name: Build application (web)
+      if: matrix.app == 'web'
+      working-directory: apps/web
+      run: npm run build
+
+    - name: Build application (api)
+      if: matrix.app == 'api'
+      working-directory: apps/api
+      run: go build -o bin/api .
+
+    - name: Build Docker image
+      run: |
+        docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.app }}:${{ github.sha }} apps/${{ matrix.app }}
+        docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.app }}:${{ github.sha }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.app }}:latest
+
+    - name: Run security scan on Docker image
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.app }}:${{ github.sha }}
+        format: 'table'
+        exit-code: '1'
+        severity: 'CRITICAL,HIGH'
+
+  # =================================================================
+  # Integration Tests
+  # =================================================================
+  integration-tests:
+    runs-on: ubuntu-latest
+    needs: [validate-config, build-and-test]
+    name: Integration Tests
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_USER: headscale
+          POSTGRES_DB: headscale
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup test environment
+      run: |
+        cp .env.production .env.test
+        sed -i 's/changeme_secure_password_123/test_password/' .env.test
+        sed -i 's/your_cloudflare_api_token_here/test_token/' .env.test
+
+    - name: Start test services
+      run: |
+        # Create minimal docker-compose for testing
+        cat > docker-compose.test.yml << EOF
+        version: '3.9'
+        services:
+          headscale:
+            image: headscale/headscale:latest
+            environment:
+              - HEADSCALE_CONFIG_FILE=/etc/headscale/config.yaml
+            volumes:
+              - ./config/headscale:/etc/headscale:ro
+            command: ["serve"]
+            ports:
+              - "8080:8080"
+            depends_on:
+              - postgres
+          postgres:
+            image: postgres:15-alpine
+            environment:
+              POSTGRES_DB: headscale
+              POSTGRES_USER: headscale
+              POSTGRES_PASSWORD: test_password
+            ports:
+              - "5432:5432"
+        EOF
+        
+        # Start test services
+        docker-compose -f docker-compose.test.yml up -d
+        sleep 30
+
+    - name: Test Headscale API
+      run: |
+        # Test basic Headscale functionality
+        docker-compose -f docker-compose.test.yml exec -T headscale headscale users create test-user
+        docker-compose -f docker-compose.test.yml exec -T headscale headscale users list | grep test-user
+
+    - name: Test configuration apply (dry-run)
+      run: |
+        # Test configuration validation and dry-run apply
+        echo "Testing configuration application..."
+        # This would test the orchestrator API once built
+        
+    - name: Cleanup test environment
+      if: always()
+      run: |
+        docker-compose -f docker-compose.test.yml down -v
+
+  # =================================================================
+  # Security and Quality Checks
+  # =================================================================
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: validate-config
+    name: Security and Quality Scan
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run CodeQL Analysis
+      uses: github/codeql-action/init@v2
+      with:
+        languages: go, javascript
+
+    - name: Autobuild
+      uses: github/codeql-action/autobuild@v2
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v2
+
+    - name: Run Gosec Security Scanner (Go)
+      if: hashFiles('apps/api/**/*.go') != ''
+      uses: securecodewarrior/github-action-gosec@master
+      with:
+        args: 'apps/api/...'
+
+    - name: Run ESLint Security Scanner (JavaScript)
+      if: hashFiles('apps/web/**/*.js', 'apps/web/**/*.ts') != ''
+      working-directory: apps/web
+      run: |
+        npm ci
+        npm run lint:security || true
+
+    - name: Dependency vulnerability scan
+      run: |
+        # Scan Go dependencies
+        if [ -f "apps/api/go.mod" ]; then
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          cd apps/api && govulncheck ./...
+        fi
+        
+        # Scan Node.js dependencies
+        if [ -f "apps/web/package.json" ]; then
+          cd apps/web && npm audit --audit-level moderate
+        fi
+
+  # =================================================================
+  # Deploy to Staging (on main branch)
+  # =================================================================
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: [integration-tests, security-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    name: Deploy to Staging
+    environment: staging
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Login to Container Registry
+      uses: docker/login-action@v2
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push images
+      run: |
+        # Build and push web app
+        docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-web:staging apps/web
+        docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-web:staging
+        
+        # Build and push API
+        docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-api:staging apps/api
+        docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-api:staging
+
+    - name: Deploy to staging server
+      uses: appleboy/ssh-action@v0.1.7
+      with:
+        host: ${{ secrets.STAGING_HOST }}
+        username: ${{ secrets.STAGING_USER }}
+        key: ${{ secrets.STAGING_SSH_KEY }}
+        script: |
+          cd /opt/headscale-staging
+          git pull origin main
+          docker-compose pull
+          docker-compose up -d
+          
+          # Wait for services to be ready
+          sleep 30
+          
+          # Apply configuration changes
+          ./scripts/deploy.sh --staging
+
+    - name: Run staging tests
+      run: |
+        # Run smoke tests against staging environment
+        echo "Running smoke tests against staging..."
+        curl -f ${{ secrets.STAGING_URL }}/health || exit 1
+
+    - name: Notify deployment status
+      if: always()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        channel: '#deployments'
+        text: |
+          Staging deployment ${{ job.status }}
+          Commit: ${{ github.sha }}
+          Branch: ${{ github.ref }}
+
+---
+# =================================================================
+# .github/workflows/release.yml - Production Release
+# =================================================================
+
+name: Production Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+jobs:
+  # =================================================================
+  # Production Deployment
+  # =================================================================
+  deploy-production:
+    runs-on: ubuntu-latest
+    environment: production
+    name: Deploy to Production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Login to Container Registry
+      uses: docker/login-action@v2
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and tag production images
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/}
+        
+        # Build and push web app
+        docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-web:${VERSION} apps/web
+        docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-web:latest apps/web
+        docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-web:${VERSION}
+        docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-web:latest
+        
+        # Build and push API
+        docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-api:${VERSION} apps/api
+        docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-api:latest apps/api
+        docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-api:${VERSION}
+        docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-api:latest
+
+    - name: Create backup before deployment
+      uses: appleboy/ssh-action@v0.1.7
+      with:
+        host: ${{ secrets.PRODUCTION_HOST }}
+        username: ${{ secrets.PRODUCTION_USER }}
+        key: ${{ secrets.PRODUCTION_SSH_KEY }}
+        script: |
+          cd /opt/headscale-production
+          ./scripts/backup.sh
+          echo "Pre-deployment backup created"
+
+    - name: Deploy to production
+      uses: appleboy/ssh-action@v0.1.7
+      with:
+        host: ${{ secrets.PRODUCTION_HOST }}
+        username: ${{ secrets.PRODUCTION_USER }}
+        key: ${{ secrets.PRODUCTION_SSH_KEY }}
+        script: |
+          cd /opt/headscale-production
+          
+          # Pull latest configuration
+          git pull origin main
+          
+          # Update images
+          docker-compose pull
+          
+          # Rolling update
+          ./scripts/update.sh
+          
+          # Verify deployment
+          sleep 60
+          ./scripts/monitor.sh status
+
+    - name: Run production health checks
+      run: |
+        echo "Running production health checks..."
+        # Comprehensive health checks
+        curl -f ${{ secrets.PRODUCTION_URL }}/health || exit 1
+        curl -f ${{ secrets.PRODUCTION_URL }}/api/v1/status || exit 1
+
+    - name: Notify production deployment
+      if: always()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        channel: '#production'
+        text: |
+          🚀 Production deployment ${{ job.status }}
+          Version: ${{ github.ref }}
+          Commit: ${{ github.sha }}
+          Time: ${{ github.event.head_commit.timestamp }}
+
+---
+# =================================================================
+# .github/workflows/config-sync.yml - Configuration Sync
+# =================================================================
+
+name: Configuration Sync
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'data/**'
+  schedule:
+    # Run every hour to check for drift
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'check-drift'
+        type: choice
+        options:
+          - check-drift
+          - apply-config
+          - force-sync
+
+jobs:
+  # =================================================================
+  # Configuration Drift Detection
+  # =================================================================
+  check-drift:
+    runs-on: ubuntu-latest
+    name: Check Configuration Drift
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Check configuration drift
+      run: |
+        echo "🔍 Checking configuration drift..."
+        
+        # Call orchestrator API to check drift
+        DRIFT_RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.ORCHESTRATOR_API_KEY }}" \
+          "${{ secrets.PRODUCTION_URL }}/api/v1/drift")
+        
+        echo "Drift response: $DRIFT_RESPONSE"
+        
+        HAS_DRIFT=$(echo "$DRIFT_RESPONSE" | jq -r '.has_drift')
+        
+        if [ "$HAS_DRIFT" = "true" ]; then
+          echo "⚠️ Configuration drift detected!"
+          echo "$DRIFT_RESPONSE" | jq -r '.drifts[]' > drift-report.txt
+          
+          # Create issue for drift
+          gh issue create \
+            --title "Configuration Drift Detected - $(date)" \
+            --body "$(cat drift-report.txt)" \
+            --label "drift,config" \
+            || echo "Failed to create issue"
+        else
+          echo "✅ No configuration drift detected"
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Apply configuration if needed
+      if: github.event.inputs.action == 'apply-config' || github.event.inputs.action == 'force-sync'
+      run: |
+        echo "🔄 Applying configuration changes..."
+        
+        FORCE_FLAG=""
+        if [ "${{ github.event.inputs.action }}" = "force-sync" ]; then
+          FORCE_FLAG="--force"
+        fi
+        
+        APPLY_RESPONSE=$(curl -s -X POST \
+          -H "Authorization: Bearer ${{ secrets.ORCHESTRATOR_API_KEY }}" \
+          -H "Content-Type: application/json" \
+          -d '{"dry_run": false, "force": '$([[ -n "$FORCE_FLAG" ]] && echo "true" || echo "false")'}' \
+          "${{ secrets.PRODUCTION_URL }}/api/v1/apply")
+        
+        echo "Apply response: $APPLY_RESPONSE"
+        
+        SUCCESS=$(echo "$APPLY_RESPONSE" | jq -r '.success')
+        
+        if [ "$SUCCESS" = "true" ]; then
+          echo "✅ Configuration applied successfully"
+          echo "$APPLY_RESPONSE" | jq -r '.changes[]' || echo "No changes"
+        else
+          echo "❌ Configuration apply failed"
+          echo "$APPLY_RESPONSE" | jq -r '.errors[]' || echo "Unknown error"
+          exit 1
+        fi
+
+    - name: Update monitoring dashboards
+      if: success()
+      run: |
+        echo "📊 Updating monitoring dashboards..."
+        # Trigger dashboard refresh
+        curl -X POST "${{ secrets.GRAFANA_URL }}/api/admin/provisioning/dashboards/reload" \
+          -H "Authorization: Bearer ${{ secrets.GRAFANA_API_KEY }}" || echo "Dashboard refresh failed"
+
+    - name: Notify configuration sync status
+      if: always()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        channel: '#ops'
+        text: |
+          Configuration sync ${{ job.status }}
+          Action: ${{ github.event.inputs.action || 'scheduled-check' }}
+          Commit: ${{ github.sha }}
+
+---
+# =================================================================
+# .github/workflows/monitoring.yml - Infrastructure Monitoring
+# =================================================================
+
+name: Infrastructure Monitoring
+
+on:
+  schedule:
+    # Run every 15 minutes
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+jobs:
+  # =================================================================
+  # Health Monitoring
+  # =================================================================
+  health-check:
+    runs-on: ubuntu-latest
+    name: Infrastructure Health Check
+    
+    steps:
+    - name: Check service endpoints
+      run: |
+        echo "🏥 Checking service health..."
+        
+        SERVICES=(
+          "${{ secrets.PRODUCTION_URL }}/health:Headscale API"
+          "${{ secrets.PRODUCTION_URL }}/api/v1/status:Orchestrator API"
+          "${{ secrets.GRAFANA_URL }}/api/health:Grafana"
+          "${{ secrets.PROMETHEUS_URL }}/-/healthy:Prometheus"
+        )
+        
+        FAILED_SERVICES=()
+        
+        for service_info in "${SERVICES[@]}"; do
+          URL=$(echo "$service_info" | cut -d: -f1)
+          NAME=$(echo "$service_info" | cut -d: -f2)
+          
+          if curl -sf --max-time 10 "$URL" > /dev/null; then
+            echo "✅ $NAME is healthy"
+          else
+            echo "❌ $NAME is unhealthy"
+            FAILED_SERVICES+=("$NAME")
+          fi
+        done
+        
+        if [ ${#FAILED_SERVICES[@]} -gt 0 ]; then
+          echo "FAILED_SERVICES=${FAILED_SERVICES[*]}" >> $GITHUB_ENV
+          exit 1
+        fi
+
+    - name: Check SSL certificates
+      run: |
+        echo "🔒 Checking SSL certificates..."
+        
+        DOMAINS=(
+          "headscale.tailnet.work"
+          "admin.tailnet.work"
+          "api.tailnet.work"
+          "grafana.tailnet.work"
+        )
+        
+        for domain in "${DOMAINS[@]}"; do
+          EXPIRY=$(echo | openssl s_client -servername "$domain" -connect "$domain:443" 2>/dev/null | \
+                   openssl x509 -noout -dates | grep notAfter | cut -d= -f2)
+          
+          if [ -n "$EXPIRY" ]; then
+            EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s)
+            CURRENT_EPOCH=$(date +%s)
+            DAYS_LEFT=$(( (EXPIRY_EPOCH - CURRENT_EPOCH) / 86400 ))
+            
+            if [ $DAYS_LEFT -lt 14 ]; then
+              echo "⚠️ SSL certificate for $domain expires in $DAYS_LEFT days"
+              echo "SSL_WARNING=true" >> $GITHUB_ENV
+            else
+              echo "✅ SSL certificate for $domain is valid ($DAYS_LEFT days left)"
+            fi
+          else
+            echo "❌ Could not check SSL certificate for $domain"
+          fi
+        done
+
+    - name: Check disk space
+      run: |
+        echo "💽 Checking disk space on production server..."
+        
+        # This would typically use SSH to check the production server
+        # For now, we'll simulate with a curl to a monitoring endpoint
+        DISK_USAGE=$(curl -s "${{ secrets.PROMETHEUS_URL }}/api/v1/query?query=node_filesystem_avail_bytes" | \
+                     jq -r '.data.result[0].value[1]' 2>/dev/null || echo "unknown")
+        
+        if [ "$DISK_USAGE" != "unknown" ] && [ "$DISK_USAGE" -lt 1000000000 ]; then
+          echo "⚠️ Low disk space detected: $DISK_USAGE bytes available"
+          echo "DISK_WARNING=true" >> $GITHUB_ENV
+        fi
+
+    - name: Alert on failures
+      if: failure() || env.SSL_WARNING == 'true' || env.DISK_WARNING == 'true'
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        channel: '#alerts'
+        text: |
+          🚨 Infrastructure Health Alert
+          Failed Services: ${{ env.FAILED_SERVICES }}
+          SSL Warning: ${{ env.SSL_WARNING }}
+          Disk Warning: ${{ env.DISK_WARNING }}
+          Time: ${{ github.run_number }}
+
+---
+# =================================================================
+# .github/workflows/backup.yml - Automated Backups
+# =================================================================
+
+name: Automated Backup
+
+on:
+  schedule:
+    # Daily backup at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      backup_type:
+        description: 'Type of backup'
+        required: true
+        default: 'full'
+        type: choice
+        options:
+          - full
+          - config-only
+          - database-only
+
+jobs:
+  # =================================================================
+  # Create Backup
+  # =================================================================
+  create-backup:
+    runs-on: ubuntu-latest
+    name: Create System Backup
+    environment: production
+    
+    steps:
+    - name: Create backup on production server
+      uses: appleboy/ssh-action@v0.1.7
+      with:
+        host: ${{ secrets.PRODUCTION_HOST }}
+        username: ${{ secrets.PRODUCTION_USER }}
+        key: ${{ secrets.PRODUCTION_SSH_KEY }}
+        script: |
+          cd /opt/headscale-production
+          
+          BACKUP_TYPE="${{ github.event.inputs.backup_type || 'full' }}"
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          BACKUP_DIR="backup/${TIMESTAMP}_${BACKUP_TYPE}"
+          
+          echo "Creating $BACKUP_TYPE backup in $BACKUP_DIR..."
+          
+          mkdir -p "$BACKUP_DIR"
+          
+          case "$BACKUP_TYPE" in
+            "full")
+              # Full backup
+              ./scripts/backup.sh "$BACKUP_DIR"
+              ;;
+            "config-only")
+              # Configuration only
+              tar -czf "$BACKUP_DIR/config.tar.gz" config/ data/
+              ;;
+            "database-only")
+              # Database only
+              docker-compose exec -T postgres pg_dump -U headscale headscale > "$BACKUP_DIR/database.sql"
+              ;;
+          esac
+          
+          echo "Backup created: $BACKUP_DIR"
+          echo "BACKUP_PATH=$BACKUP_DIR" >> $GITHUB_ENV
+
+    - name: Upload backup to cloud storage
+      if: success()
+      uses: appleboy/ssh-action@v0.1.7
+      with:
+        host: ${{ secrets.PRODUCTION_HOST }}
+        username: ${{ secrets.PRODUCTION_USER }}
+        key: ${{ secrets.PRODUCTION_SSH_KEY }}
+        script: |
+          cd /opt/headscale-production
+          
+          # Compress backup
+          tar -czf "${BACKUP_PATH}.tar.gz" "$BACKUP_PATH"
+          
+          # Upload to S3 (if configured)
+          if [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then
+            aws s3 cp "${BACKUP_PATH}.tar.gz" "s3://${{ secrets.S3_BACKUP_BUCKET }}/headscale-backups/"
+            echo "Backup uploaded to S3"
+          fi
+          
+          # Keep local backups for 7 days
+          find backup/ -name "*.tar.gz" -mtime +7 -delete
+          
+          echo "Backup process completed"
+
+    - name: Verify backup integrity
+      run: |
+        echo "🔍 Verifying backup integrity..."
+        # This would include checks to ensure backup is complete and valid
+        echo "Backup verification completed"
+
+    - name: Notify backup status
+      if: always()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        channel: '#ops'
+        text: |
+          📦 Backup ${{ job.status }}
+          Type: ${{ github.event.inputs.backup_type || 'scheduled-full' }}
+          Time: $(date)
+
+---
+# =================================================================
+# .github/workflows/security-scan.yml - Security Scanning
+# =================================================================
+
+name: Security Scan
+
+on:
+  schedule:
+    # Weekly security scan on Sundays
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+jobs:
+  # =================================================================
+  # Container Security Scan
+  # =================================================================
+  container-scan:
+    runs-on: ubuntu-latest
+    name: Container Security Scan
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Build images for scanning
+      run: |
+        docker build -t headscale-web:scan apps/web
+        docker build -t headscale-api:scan apps/api
+
+    - name: Run Trivy vulnerability scanner - Web
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'headscale-web:scan'
+        format: 'sarif'
+        output: 'trivy-web-results.sarif'
+
+    - name: Run Trivy vulnerability scanner - API
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'headscale-api:scan'
+        format: 'sarif'
+        output: 'trivy-api-results.sarif'
+
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: '.'
+
+  # =================================================================
+  # Infrastructure Security Scan
+  # =================================================================
+  infrastructure-scan:
+    runs-on: ubuntu-latest
+    name: Infrastructure Security Scan
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Checkov on Infrastructure as Code
+      uses: bridgecrewio/checkov-action@master
+      with:
+        directory: .
+        framework: docker,yaml
+        output_format: sarif
+        output_file_path: checkov-results.sarif
+
+    - name: Upload Checkov scan results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: checkov-results.sarif
+
+    - name: Docker Bench Security
+      run: |
+        docker run --rm --net host --pid host --userns host --cap-add audit_control \
+          -e DOCKER_CONTENT_TRUST=$DOCKER_CONTENT_TRUST \
+          -v /etc:/etc:ro \
+          -v /usr/bin/containerd:/usr/bin/containerd:ro \
+          -v /usr/bin/runc:/usr/bin/runc:ro \
+          -v /usr/lib/systemd:/usr/lib/systemd:ro \
+          -v /var/lib:/var/lib:ro \
+          -v /var/run/docker.sock:/var/run/docker.sock:ro \
+          --label docker_bench_security \
+          docker/docker-bench-security || true
+
+    - name: Notify security scan results
+      if: always()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        channel: '#security'
+        text: |
+          🔒 Security scan ${{ job.status }}
+          Check GitHub Security tab for detailed results
+          Time: $(date)

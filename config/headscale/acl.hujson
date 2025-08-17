@@ -1,0 +1,69 @@
+{
+  "groups": {
+    "group:admins": ["admin@tailnet.work"]
+  },
+  "tagOwners": {
+    "tag:admin": ["group:admins"]
+  },
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["*"],
+      "dst": ["*:*"]
+    }
+  ]
+}
+{
+  // Groups definition
+  "groups": {
+    "group:admins": [
+      "admin@tailnet.work"
+    ],
+    "group:employees": [
+      "group:admins"
+    ]
+  },
+
+  // Tag owners
+  "tagOwners": {
+    "tag:server": ["group:admins"],
+    "tag:employee": ["group:admins"]
+  },
+
+  // ACL Rules
+  "acls": [
+    // Admin access
+    {
+      "action": "accept",
+      "src": ["group:admins"],
+      "dst": ["*:*"],
+      "comment": "Admins have full access"
+    },
+    
+    // Employee access
+    {
+      "action": "accept",
+      "src": ["group:employees"],
+      "dst": ["autogroup:members:*"],
+      "comment": "Employees can access other employees"
+    },
+    
+    // Internet access
+    {
+      "action": "accept",
+      "src": ["autogroup:members"],
+      "dst": ["autogroup:internet:*"],
+      "comment": "All users can access internet"
+    }
+  ],
+
+  // SSH access
+  "ssh": [
+    {
+      "action": "accept",
+      "src": ["group:admins"],
+      "dst": ["autogroup:self"],
+      "users": ["root", "autogroup:nonroot"]
+    }
+  ]
+}
