@@ -37,7 +37,7 @@ certificatesResolvers:
 providers:
   docker:
     exposedByDefault: false
-    network: headscale-infrastructure_headscale-network
+    network: headscale-project_headscale-network
   file:
     filename: /etc/traefik/dynamic.yml
     watch: true

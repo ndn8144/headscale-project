@@ -1,31 +1,18 @@
 {
-  "groups": {
-    "group:admins": ["admin@tailnet.work"]
-  },
-  "tagOwners": {
-    "tag:admin": ["group:admins"]
-  },
-  "acls": [
-    {
-      "action": "accept",
-      "src": ["*"],
-      "dst": ["*:*"]
-    }
-  ]
-}
-{
   // Groups definition
   "groups": {
     "group:admins": [
       "admin@tailnet.work"
     ],
     "group:employees": [
-      "group:admins"
+      "employee1@tailnet.work",
+      "employee2@tailnet.work"
     ]
   },
 
   // Tag owners
   "tagOwners": {
+    "tag:admin": ["group:admins"],
     "tag:server": ["group:admins"],
     "tag:employee": ["group:admins"]
   },
@@ -44,14 +31,14 @@
     {
       "action": "accept",
       "src": ["group:employees"],
-      "dst": ["autogroup:members:*"],
+      "dst": ["group:employees:*"],
       "comment": "Employees can access other employees"
     },
     
     // Internet access
     {
       "action": "accept",
-      "src": ["autogroup:members"],
+      "src": ["*"],
       "dst": ["autogroup:internet:*"],
       "comment": "All users can access internet"
     }
@@ -62,7 +49,7 @@
     {
       "action": "accept",
       "src": ["group:admins"],
-      "dst": ["autogroup:self"],
+      "dst": ["*"],
       "users": ["root", "autogroup:nonroot"]
     }
   ]

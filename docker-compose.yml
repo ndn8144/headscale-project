@@ -44,7 +44,7 @@ services:
       - --accesslog=true
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
-      - --providers.docker.network=headscale-infrastructure_headscale-network
+      - --providers.docker.network=headscale-project_headscale-network
       - --entrypoints.web.address=:80
       - --entrypoints.websecure.address=:443
       - --entrypoints.udps.address=:443/udp
@@ -117,7 +117,7 @@ services:
       - HEADSCALE_CONFIG_FILE=/etc/headscale/config.yaml
     labels:
       - "traefik.enable=true"
-      - "traefik.docker.network=headscale-infrastructure_headscale-network"
+      - "traefik.docker.network=headscale-project_headscale-network"
       - "traefik.http.routers.headscale.rule=Host(`headscale.tailnet.work`)"
       - "traefik.http.routers.headscale.entrypoints=websecure"
       - "traefik.http.routers.headscale.tls.certresolver=cloudflare"
@@ -169,11 +169,11 @@ services:
       - headscale
     labels:
       - "traefik.enable=true"
-      - "traefik.docker.network=headscale-infrastructure_headscale-network"
+      - "traefik.docker.network=headscale-project_headscale-network"
       - "traefik.http.routers.admin.rule=Host(`admin.tailnet.work`)"
       - "traefik.http.routers.admin.entrypoints=websecure"
       - "traefik.http.routers.admin.tls.certresolver=cloudflare"
-      - "traefik.http.routers.admin.middlewares=security,ratelimit"
+      - "traefik.http.routers.admin.middlewares=security"
       - "traefik.http.services.admin.loadbalancer.server.port=3000"
 
   # Config Orchestrator API
@@ -199,15 +199,12 @@ services:
       - headscale
     labels:
       - "traefik.enable=true"
-      - "traefik.docker.network=headscale-infrastructure_headscale-network"
+      - "traefik.docker.network=headscale-project_headscale-network"
       - "traefik.http.routers.api.rule=Host(`api.tailnet.work`)"
       - "traefik.http.routers.api.entrypoints=websecure"
       - "traefik.http.routers.api.tls.certresolver=cloudflare"
-      - "traefik.http.routers.api.middlewares=security,api-ratelimit"
+      - "traefik.http.routers.api.middlewares=security"
       - "traefik.http.services.api.loadbalancer.server.port=8000"
-      # Rate limiting for API
-      - "traefik.http.middlewares.api-ratelimit.ratelimit.average=200"
-      - "traefik.http.middlewares.api-ratelimit.ratelimit.burst=50"
 
   # Prometheus - Metrics Collection
   prometheus:
@@ -231,11 +228,11 @@ services:
       - '--web.enable-admin-api'
     labels:
       - "traefik.enable=true"
-      - "traefik.docker.network=headscale-infrastructure_headscale-network"
+      - "traefik.docker.network=headscale-project_headscale-network"
       - "traefik.http.routers.prometheus.rule=Host(`monitor.tailnet.work`)"
       - "traefik.http.routers.prometheus.entrypoints=websecure"
       - "traefik.http.routers.prometheus.tls.certresolver=cloudflare"
-      - "traefik.http.routers.prometheus.middlewares=security,auth"
+      - "traefik.http.routers.prometheus.middlewares=security"
       - "traefik.http.services.prometheus.loadbalancer.server.port=9090"
 
   # Grafana - Visualization
@@ -259,7 +256,7 @@ services:
       - prometheus
     labels:
       - "traefik.enable=true"
-      - "traefik.docker.network=headscale-infrastructure_headscale-network"
+      - "traefik.docker.network=headscale-project_headscale-network"
       - "traefik.http.routers.grafana.rule=Host(`grafana.tailnet.work`)"
       - "traefik.http.routers.grafana.entrypoints=websecure"
       - "traefik.http.routers.grafana.tls.certresolver=cloudflare"
@@ -315,11 +312,11 @@ services:
       - '--web.external-url=https://alerts.tailnet.work'
     labels:
       - "traefik.enable=true"
-      - "traefik.docker.network=headscale-infrastructure_headscale-network"
+      - "traefik.docker.network=headscale-project_headscale-network"
       - "traefik.http.routers.alertmanager.rule=Host(`alerts.tailnet.work`)"
       - "traefik.http.routers.alertmanager.entrypoints=websecure"
       - "traefik.http.routers.alertmanager.tls.certresolver=cloudflare"
-      - "traefik.http.routers.alertmanager.middlewares=security,auth"
+      - "traefik.http.routers.alertmanager.middlewares=security"
       - "traefik.http.services.alertmanager.loadbalancer.server.port=9093"
 
   # cAdvisor - Container Metrics

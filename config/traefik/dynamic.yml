@@ -16,8 +16,6 @@ http:
         referrerPolicy: "strict-origin-when-cross-origin"
         contentSecurityPolicy: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; font-src 'self' https://cdnjs.cloudflare.com; img-src 'self' data: https:; connect-src 'self' ws: wss:;"
         permissionsPolicy: "geolocation=(), microphone=(), camera=()"
-        customFrameOptionsValue: "SAMEORIGIN"
-        xXSSProtection: "1; mode=block"
 
     cors:
       headers:
