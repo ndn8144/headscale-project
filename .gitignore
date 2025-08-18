@@ -211,6 +211,7 @@ Thumbs.db
 *.swp
 *.swo
 *~
+gg_secret.json
 
 # Backup files
 *.bak
